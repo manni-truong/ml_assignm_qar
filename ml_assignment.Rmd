@@ -1,0 +1,163 @@
+---
+title: "Qualitative Acticity Recognition of Weight Lifting"
+author: "Manni Truong"
+date: "30 January 2016"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache=TRUE)
+```
+
+## Introduction
+
+As part of Coursera's Practical Machine Learning course it is required to put together an assigment that incorporates the concepts learned. In particular we are given a dataset from the paper [Qualitative Activity Recognition of Weight Lifting Exercises][1] (Velloso et al). The paper deals with activity recognition via a sensor approach as well as a model-based one. Rather than studying how often people exercise the paper investigates how to qualitatively measure how well people do it. This is done by specifying a correct way of doing an exercise as well as specifying wrong ways of doing it. This assigment will take the data collected from sensors on the belt, forearm, arm and dumbbell of participants to predict the manner in which they did the exercise.  
+
+## Data
+
+### Background
+
+The data is obtained from the study. It contains measurements on six participants who perform one set of 10 repitions of [Unilateral Dumbbell Biceps Curls][2] in five different ways:
+
+- class A: exactly to specification 
+- class B: throwing the elbows to the front 
+- class C: lifting dumbbell only halfway 
+- class D: lowering dumbbell only halfway 
+- class E: throwing the hips to the front
+
+The first class (A) corrospends to doing the exercise correctly whereas the other four classes (B to E) are variations of how not to exercise.
+
+### Loading
+
+```{r message=FALSE}
+
+# load libraries
+library(caret)
+library(parallel)
+library(doParallel)
+
+# load data
+pml.training <- read.csv("pml-training.csv")
+pml.testing <- read.csv("pml-testing.csv")
+
+dim(pml.training)
+
+```
+
+The original training data set has 19622 rows and 160 columns. In the following section we will trim the number of columns down to 53.
+
+### Cleaning
+
+Having explored the data with the help of the paper we first remove the first 7 columns. The first column `X` is just an index.  
+
+```{r}
+colnames(pml.training)[1:7]
+```
+
+The `user_name` column identifies the participant. The timestamp columns refer to the time the exercise was being done. Removing those will avoid collinarity issues with the sensor data since inherently they are correlated with the x, y and z sensor data. The window variables have been created because the paper cited earlier uses a sliding window approach for feature extraction. They are an extension of the time variables so we also remove them.
+
+The other group of columns that we want to remove are identified as statistics variables such as the average, standard deviation, variance, minimum, maximum etc. Looking the at dataset closely those variables are only populated when the `new_window` column (which we removed) equals to yes. This is due to the sliding window approach mentioned earlier. The statistical measures are calculated over one group, i.e. the `num_window`. We remove them since we only want the actual measurements from the sensors.
+
+
+```{r}
+# remove first seven columns
+to_be_removed <- c(colnames(pml.training)[1:7])
+pml.training.clean <- pml.training[, !names(pml.training) %in% to_be_removed]
+pml.testing.clean <- pml.testing[, !names(pml.testing) %in% to_be_removed]
+
+# remove statistical measures
+stats_cols <- colnames(pml.training)[grepl("avg|stddev|var|min|max|kurtosis|amplitude|skewness*", colnames(pml.training))]
+pml.training.clean <- pml.training.clean[, !names(pml.training.clean) %in% stats_cols]
+pml.testing.clean <- pml.testing.clean[, !names(pml.testing.clean) %in% stats_cols]
+
+dim(pml.training.clean)
+```
+
+After the cleaning we are left with a dataset of 52 features and 1 outcome variable.
+
+## Building models
+
+Before we build our model, the original training dataset we loaded is split again into a training (70%) and test (30%) dataset. 
+
+```{r}
+# set seed
+set.seed(1986)
+
+# split data into training and test
+inTrain <- createDataPartition(y = pml.training.clean$classe, p = .7, list = FALSE)
+
+pml.training.clean.training <- pml.training.clean[inTrain,]
+pml.training.clean.testing <- pml.training.clean[-inTrain,]
+
+```
+
+### Feature correlation
+We then look at this new training set to investigate the 52 features using a correlation matrix. This is done to decide whether we will use Principal Component Analysis (PCA) to further remove any predictors that are highly correlated to avoid multicollinearity.  
+
+```{r}
+
+cor.mat <- cor(pml.training.clean[, -53])
+corrplot::corrplot(cor.mat, order = "FPC", method = "color", tl.cex = .8, type = "lower")
+
+```
+
+The graph shows the lower bit of the correlation matrix revealing correlations between the predictors. We are interested in the hihgly negatively (dark red) correlated features as well the highly positively (dark blue) correlated ones. The top diagonal dark blue squares can be ignored since they represent correlations with themselves, e.g. `accel_belt_z` on `accel_belt_z`. Based on the plot we decide not to bother with PCA processing to avoid complicating our model.
+
+### Random forests
+
+Following Leonard Greski excellent [writeup][3] on parallel processing we follow this approach to train a model. We use the trainControl function to specify a 10 fold cross validation and allow for parallel processing. 
+
+```{r message=FALSE}
+
+# for parallel processing
+cluster <- makeCluster(detectCores() - 1) # convention to leave 1 core for OS
+registerDoParallel(cluster)
+
+fitControl <- trainControl(method = "cv",number = 10, allowParallel = TRUE)
+modelFit.pml <- train(classe~., data = pml.training.clean.training, method = "rf", trControl = fitControl)
+
+# shutting down cluster
+stopCluster(cluster)
+
+```
+
+```{r}
+
+modelFit.pml$finalModel
+
+```
+
+The out-of-bag (OOB) estimate of error rate is .62% which is a good bit below 1%. It means that on average our model correctly predicts 99.38% of the time. Since the trees are repeatedly fit to bootstrapped subsets of only around 2/3 of measurements, the OOB estimate is derived from the remaining 1/3 of measurements not used for fitting purposes. The low OOB estimate gives us enough confidence to not further tune the model or use an alternative to random forest. Next we use it on the remaining test sets. 
+
+## Prediction of new samples
+
+
+```{r}
+
+predictions <- predict(modelFit.pml, pml.training.clean.testing)
+confusionMatrix(predictions, pml.training.clean.testing$classe)
+
+```
+
+Applying the model to our own test set gives an accuracy of 99.47%. Given this high reading we turn to the original test dataset.
+
+
+We apply our model to the test set with the 20 test cases to answer the quiz question which is part of this assignment. We exclude column 53 `problem_id` which refers to the respective quizz question. Our model predictions get a 20/20 score.
+
+```{r}
+
+predictions.testing <- predict(modelFit.pml, pml.testing.clean[, -53])
+predictions.testing
+
+```
+
+
+## Conclusion
+
+Most of our time spent was on investigating and cleaning the original dataset. Reading the paper by Velloso et al gave us a good background in order to remove variables from the data. This combined with using random forest to train a model was enough to give us a 99.38% accuracy. 
+
+
+[1]: http://groupware.les.inf.puc-rio.br/har
+[2]: https://www.youtube.com/watch?v=YxtwA7XRK_g
+[3]: https://github.com/lgreski/datasciencectacontent/blob/master/markdown/pml-randomForestPerformance.md
+
